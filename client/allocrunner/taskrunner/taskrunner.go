@@ -2,7 +2,6 @@ package taskrunner
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -28,9 +27,6 @@ func New(conf Config) *TaskRunner {
 
 func (tr *TaskRunner) Run(ctx context.Context) {
 	defer tr.log.Info("task runner exited")
-
-	buf, _ := json.MarshalIndent(tr.task, "", "  ")
-	fmt.Println("TASK:\n" + string(buf))
 
 	// msgpack was a mistake
 	commandBytes, _ := tr.task.Config["command"].([]byte)
@@ -68,14 +64,16 @@ func (tr *TaskRunner) Run(ctx context.Context) {
 		env = append(env, k+"="+v)
 	}
 
-	stdout, err := os.Create(fmt.Sprintf("%s-%s.stdout.log", tr.allocID, tr.task.Name))
+	stdout, err := os.OpenFile(fmt.Sprintf("%s-%s.stdout.log", tr.allocID, tr.task.Name),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		tr.log.Error("unable to create stdout log", "error", err)
 		return
 	}
 	defer stdout.Close()
 
-	stderr, err := os.Create(fmt.Sprintf("%s-%s.stderr.log", tr.allocID, tr.task.Name))
+	stderr, err := os.OpenFile(fmt.Sprintf("%s-%s.stderr.log", tr.allocID, tr.task.Name),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		tr.log.Error("unable to create stderr log", "error", err)
 		return

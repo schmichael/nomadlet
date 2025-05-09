@@ -138,12 +138,12 @@ func (c *Client) fetchAllocs(ctx context.Context) {
 			time.Sleep(3 * time.Second)
 			continue
 		}
-		c.log.Info(">>>>>>", "allocs", allocIndexes.Allocs)
 
 		for allocID, index := range allocIndexes.Allocs {
 			ar, ok := allocs[allocID]
 			switch {
 			case !ok:
+				c.log.Debug("starting alloc", "alloc", allocID)
 				// New alloc
 				ac := allocrunner.Config{
 					AllocID:     allocID,
@@ -165,6 +165,7 @@ func (c *Client) fetchAllocs(ctx context.Context) {
 		// Stop missing allocs
 		for allocID, ar := range allocs {
 			if _, ok := allocIndexes.Allocs[allocID]; !ok {
+				c.log.Debug("stopping alloc", "alloc", allocID)
 				ar.Stop()
 				delete(allocs, allocID)
 			}
