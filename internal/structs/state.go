@@ -14,6 +14,7 @@ type State struct {
 }
 
 func StateLoad(path string) (*State, error) {
+	fmt.Println("opening path: " + path)
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

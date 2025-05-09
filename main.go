@@ -22,6 +22,7 @@ func main() {
 	flag.StringVar(&config.Datacenter, "dc", config.Datacenter, "datacenter")
 	flag.StringVar(&config.Server, "server", config.Server, "server address")
 	flag.StringVar(&config.StatePath, "state", config.StatePath, "state file path")
+	flag.StringVar(&config.Name, "name", config.Name, "node name")
 	//TODO tls stuff
 	//TODO multi-server handling
 
@@ -33,6 +34,11 @@ func main() {
 	if versionFlag {
 		fmt.Println("nomadlet " + version.Version)
 		os.Exit(0)
+	}
+
+	if config.Name == "" {
+		fmt.Fprintf(os.Stderr, "must specify node name")
+		os.Exit(1)
 	}
 
 	client, err := client.NewClient(config)

@@ -26,3 +26,4 @@ go.work.sum
 
 nomadlet
 state.json
+*.log

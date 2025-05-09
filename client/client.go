@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/schmichael/nomadlet/client/allocrunner"
 	"github.com/schmichael/nomadlet/internal/rpc"
 	"github.com/schmichael/nomadlet/internal/structs"
 	"github.com/schmichael/nomadlet/internal/uuid"
@@ -51,7 +52,7 @@ func NewClient(config *structs.Config) (*Client, error) {
 		rpc:   rpcClient,
 		state: state,
 		log: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-			AddSource: true,
+			AddSource: false,
 			Level:     slog.LevelDebug,
 		})),
 	}, nil
@@ -63,6 +64,32 @@ func (c *Client) Run(ctx context.Context) {
 		c.log.Debug("interrupt received")
 	}()
 
+	// 1. Register
+	var err error
+	var regResp *rpc.NodeUpdateResponse
+	for ctx.Err() == nil {
+		regResp, err = c.rpc.NodeRegister(c.node)
+		if err == nil {
+			break
+		}
+		c.log.Error("error registering node... retrying", "error", err)
+
+		time.Sleep(10 * time.Second)
+	}
+	if ctx.Err() != nil {
+		return
+	}
+
+	// 2. Heartbeat
+	go c.heartbeat(ctx, regResp.HeartbeatTTL)
+
+	c.log.Info("registered node", "resp", regResp)
+
+	// 3. Run allocs
+	go c.fetchAllocs(ctx)
+
+	// 9. Ping in a loop because this was the first code I wrote, and I'm too
+	//    attached to it to delete it.
 	for ctx.Err() == nil {
 		start := time.Now()
 		if err := c.rpc.StatusPing(); err != nil {
@@ -72,5 +99,78 @@ func (c *Client) Run(ctx context.Context) {
 		}
 		time.Sleep(10 * time.Second)
 	}
-	c.log.Debug("client exiting")
+	c.log.Debug("client exited")
+}
+
+func (c *Client) heartbeat(ctx context.Context, initial time.Duration) {
+	defer c.log.Debug("heartbeat exited")
+
+	timer := time.NewTimer(initial)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+
+		resp, err := c.rpc.NodeUpdateStatus()
+		if err != nil {
+			c.log.Error("failed to heartbeat; retrying", "error", err)
+			//TODO jitter
+			timer.Reset(3 * time.Second)
+			continue
+		}
+
+		c.log.Debug("heartbeat", "initial", initial, "next", resp.HeartbeatTTL)
+		timer.Reset(resp.HeartbeatTTL)
+	}
+}
+
+func (c *Client) fetchAllocs(ctx context.Context) {
+	defer c.log.Debug("no longer fetching allocs")
+
+	allocs := map[string]*allocrunner.AllocRunner{}
+
+	for ctx.Err() == nil {
+		allocIndexes, err := c.rpc.NodeGetClientAllocs()
+		if err != nil {
+			c.log.Error("error fetching client allocs", "error", err)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		c.log.Info(">>>>>>", "allocs", allocIndexes.Allocs)
+
+		for allocID, index := range allocIndexes.Allocs {
+			ar, ok := allocs[allocID]
+			switch {
+			case !ok:
+				// New alloc
+				ac := allocrunner.Config{
+					AllocID:     allocID,
+					ModifyIndex: index,
+					RPC:         c.rpc,
+					Logger:      c.log.With("alloc_id", allocID),
+				}
+				ar := allocrunner.New(ac)
+				allocs[allocID] = ar
+				go ar.Run()
+			case ar.ModifyIndex() < index:
+				// Updated allocs
+				ar.Update()
+			default:
+				// No change
+			}
+		}
+
+		// Stop missing allocs
+		for allocID, ar := range allocs {
+			if _, ok := allocIndexes.Allocs[allocID]; !ok {
+				ar.Stop()
+				delete(allocs, allocID)
+			}
+		}
+
+		//TODO lol
+		time.Sleep(3 * time.Second)
+	}
 }

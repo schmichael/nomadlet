@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/schmichael/nomadlet/internal/structs"
 	"github.com/ugorji/go/codec"
@@ -18,16 +19,22 @@ var (
 	msgpackHandle = &codec.MsgpackHandle{}
 )
 
+// Client is a synchronous RPC client safe to call from multiple goroutines.
 type Client struct {
 	region     string
+	nodeID     string
 	nodeSecret string
 	addr       string
 	conn       net.Conn
+	seq        uint64
+
+	mu sync.Mutex
 }
 
 func NewClient(state *structs.State, conf *structs.Config) (*Client, error) {
 	return &Client{
 		region:     conf.Region,
+		nodeID:     state.NodeID,
 		nodeSecret: state.NodeSecret,
 		addr:       conf.Server,
 	}, nil
@@ -63,15 +70,13 @@ func (c *Client) closeConn() {
 	c.conn = nil
 }
 
-func (c *Client) StatusPing() error {
+func (c *Client) do(method string, request, response any) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seq++
 	reqHeader := &requestHeader{
-		ServiceMethod: "Status.Ping",
-		Seq:           1,
-	}
-
-	reqBody := &queryRequest{
-		Region:    c.region,
-		AuthToken: c.nodeSecret,
+		ServiceMethod: method,
+		Seq:           c.seq,
 	}
 
 	conn, err := c.getConn()
@@ -84,13 +89,13 @@ func (c *Client) StatusPing() error {
 	if err := enc.Encode(reqHeader); err != nil {
 		c.closeConn()
 		return fmt.Errorf("error writing %q request header: %w",
-			reqHeader.ServiceMethod, err)
+			method, err)
 	}
 
-	if err := enc.Encode(reqBody); err != nil {
+	if err := enc.Encode(request); err != nil {
 		c.closeConn()
 		return fmt.Errorf("error writing %q request body: %w",
-			reqHeader.ServiceMethod, err)
+			method, err)
 	}
 
 	// Read resposne
@@ -99,39 +104,108 @@ func (c *Client) StatusPing() error {
 	if err := dec.Decode(respHeader); err != nil {
 		c.closeConn()
 		return fmt.Errorf("error writing %q request body: %w",
-			reqHeader.ServiceMethod, err)
+			method, err)
 	}
 
 	if respHeader.Error != "" {
 		// Throw away body and return error
 		if err := dec.Decode(&struct{}{}); err != nil {
 			c.closeConn()
-			return fmt.Errorf("error discarding response body: %w - after %q RPC returned an error: %s", err, reqHeader.ServiceMethod, respHeader.Error)
+			return fmt.Errorf("error discarding response body: %w - after %q RPC returned an error: %s", err, method, respHeader.Error)
 		}
 		return errors.New(respHeader.Error)
 	}
 
 	// No body for Status.Ping
-	if err := dec.Decode(&struct{}{}); err != nil {
+	if err := dec.Decode(response); err != nil {
 		c.closeConn()
-		return fmt.Errorf("error reading response body: %w", err)
+		return fmt.Errorf("error reading %q response body: %w", method, err)
 	}
 
 	return nil
 }
 
-type requestHeader struct {
-	ServiceMethod string
-	Seq           uint64
+func (c *Client) StatusPing() error {
+	req := &queryRequest{
+		Region:    c.region,
+		AuthToken: c.nodeSecret,
+	}
+
+	return c.do("Status.Ping", req, &struct{}{})
 }
 
-type queryRequest struct {
-	Region    string
-	AuthToken string
+func (c *Client) NodeRegister(node *structs.Node) (*NodeUpdateResponse, error) {
+	req := &nodeRegisterRequest{
+		Node: node,
+		WriteRequest: WriteRequest{
+			Region:    c.region,
+			AuthToken: c.nodeSecret,
+		},
+	}
+
+	resp := &NodeUpdateResponse{}
+	if err := c.do("Node.Register", req, resp); err != nil {
+		return nil, err
+	}
+
+	return resp, nil
 }
 
-type responseHeader struct {
-	Method string
-	Seq    uint64
-	Error  string
+func (c *Client) NodeUpdateStatus() (*NodeUpdateResponse, error) {
+	req := &NodeUpdateStatusRequest{
+		NodeID: c.nodeID,
+		Status: "ready",
+
+		WriteRequest: WriteRequest{
+			Region:    c.region,
+			AuthToken: c.nodeSecret,
+		},
+	}
+
+	resp := &NodeUpdateResponse{}
+	if err := c.do("Node.UpdateStatus", req, resp); err != nil {
+		return nil, err
+	}
+
+	return resp, nil
+}
+
+func (c *Client) NodeGetClientAllocs() (*NodeClientAllocsResponse, error) {
+	req := &NodeSpecificRequest{
+		NodeID:   c.nodeID,
+		SecretID: c.nodeSecret,
+		WriteRequest: WriteRequest{
+			Region:    c.region,
+			AuthToken: c.nodeSecret,
+		},
+	}
+
+	resp := &NodeClientAllocsResponse{}
+	if err := c.do("Node.GetClientAllocs", req, resp); err != nil {
+		return nil, err
+	}
+
+	return resp, nil
+}
+
+func (c *Client) GetAlloc(id string) (*structs.Allocation, error) {
+	// Use GetAllocs RPC since we don't know the namespace
+	req := &AllocsGetRequest{
+		AllocIDs: []string{id},
+		QueryOptions: QueryOptions{
+			Region:    c.region,
+			AuthToken: c.nodeSecret,
+		},
+	}
+
+	resp := &AllocsGetResponse{}
+	if err := c.do("Alloc.GetAllocs", req, resp); err != nil {
+		return nil, err
+	}
+
+	if n := len(resp.Allocs); n != 1 {
+		return nil, fmt.Errorf("unexpected number of allocs: %d", n)
+	}
+
+	return resp.Allocs[0], nil
 }
